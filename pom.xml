@@ -10,9 +10,9 @@
 
     <properties>
         <assertj.version>3.12.2</assertj.version>
-        <junit-jupiter.version>5.4.2</junit-jupiter.version>
+        <junit-jupiter.version>5.7.1</junit-jupiter.version>
         <maven-surefire-plugin.version>2.22.1</maven-surefire-plugin.version>
-        <neo4j.version>3.5.8</neo4j.version>
+        <neo4j.version>4.2.5</neo4j.version>
         <neo4j.driver.version>1.7.5</neo4j.driver.version>
         <roaring.version>0.7.30</roaring.version>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
@@ -70,6 +70,12 @@
 
         <dependency>
             <groupId>org.junit.jupiter</groupId>
+            <artifactId>junit-jupiter-api</artifactId>
+            <version>${junit-jupiter.version}</version>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.junit.jupiter</groupId>
             <artifactId>junit-jupiter-engine</artifactId>
             <version>${junit-jupiter.version}</version>
             <scope>test</scope>
@@ -101,7 +107,7 @@
                      of each Neo4j instance in your deployment.
                      After a restart, the procedure is available for calling. -->
                 <artifactId>maven-shade-plugin</artifactId>
-                <version>3.2.1</version>
+                <version>3.2.0</version>
                 <executions>
                     <execution>
                         <phase>package</phase>
@@ -112,10 +118,9 @@
                 </executions>
             </plugin>
             <plugin>
-                <!-- Be ready for JDK 11+. Also JUnit 5 requires at least 2.22.1 -->
                 <groupId>org.apache.maven.plugins</groupId>
                 <artifactId>maven-surefire-plugin</artifactId>
-                <version>${maven-surefire-plugin.version}</version>
+                <version>2.22.0</version>
             </plugin>
         </plugins>
     </build>

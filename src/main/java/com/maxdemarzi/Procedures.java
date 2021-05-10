@@ -3,17 +3,18 @@ package com.maxdemarzi;
 import com.maxdemarzi.results.LongResult;
 import org.neo4j.graphdb.*;
 import org.neo4j.internal.kernel.api.*;
-import org.neo4j.internal.kernel.api.helpers.RelationshipSelectionCursor;
 import org.neo4j.internal.kernel.api.helpers.RelationshipSelections;
 import org.neo4j.kernel.api.KernelTransaction;
-import org.neo4j.kernel.impl.core.ThreadToStatementContextBridge;
-import org.neo4j.kernel.internal.GraphDatabaseAPI;
 import org.neo4j.logging.Log;
 import org.neo4j.procedure.*;
+import org.neo4j.storageengine.api.RelationshipSelection;
 import org.roaringbitmap.longlong.Roaring64NavigableMap;
 
-import java.util.*;
-import java.util.concurrent.*;
+import java.util.Iterator;
+import java.util.List;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Phaser;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.stream.Stream;
 
@@ -23,6 +24,9 @@ public class Procedures {
     // as context when any procedure in this class is invoked
     @Context
     public GraphDatabaseService db;
+
+    @Context
+    public KernelTransaction ktx;
 
     // This gives us a log instance that outputs messages to the
     // standard log, normally found under `data/log/neo4j.log`
@@ -70,45 +74,47 @@ public class Procedures {
                 }
             }
 
-            for (int i = 1; i < distance; i++) {
-                // next even Hop
-                nextB.andNot(seen);
-                seen.or(nextB);
-                nextA.clear();
-                iterator = nextB.iterator();
-                while (iterator.hasNext()) {
-                    nodeId = iterator.next();
-                    node = db.getNodeById(nodeId);
-                    if (types.length == 0) {
-                        for (Relationship r : node.getRelationships()) {
-                            nextA.add(r.getOtherNodeId(nodeId));
-                        }
-                    } else {
-                        for (Relationship r : node.getRelationships(types)) {
-                            nextA.add(r.getOtherNodeId(nodeId));
-                        }
-                    }
-                }
-
-                i++;
-                if (i < distance) {
-                    // next odd Hop
-                    nextA.andNot(seen);
-                    seen.or(nextA);
-                    nextB.clear();
-                    iterator = nextA.iterator();
+            try (Transaction transaction = db.beginTx()) {
+                for (int i = 1; i < distance; i++) {
+                    // next even Hop
+                    nextB.andNot(seen);
+                    seen.or(nextB);
+                    nextA.clear();
+                    iterator = nextB.iterator();
                     while (iterator.hasNext()) {
                         nodeId = iterator.next();
-                        node = db.getNodeById(nodeId);
+                        node = transaction.getNodeById(nodeId);
                         if (types.length == 0) {
                             for (Relationship r : node.getRelationships()) {
-                                nextB.add(r.getOtherNodeId(nodeId));
+                                nextA.add(r.getOtherNodeId(nodeId));
                             }
                         } else {
                             for (Relationship r : node.getRelationships(types)) {
-                                nextB.add(r.getOtherNodeId(nodeId));
+                                nextA.add(r.getOtherNodeId(nodeId));
                             }
+                        }
+                    }
 
+                    i++;
+                    if (i < distance) {
+                        // next odd Hop
+                        nextA.andNot(seen);
+                        seen.or(nextA);
+                        nextB.clear();
+                        iterator = nextA.iterator();
+                        while (iterator.hasNext()) {
+                            nodeId = iterator.next();
+                            node = transaction.getNodeById(nodeId);
+                            if (types.length == 0) {
+                                for (Relationship r : node.getRelationships()) {
+                                    nextB.add(r.getOtherNodeId(nodeId));
+                                }
+                            } else {
+                                for (Relationship r : node.getRelationships(types)) {
+                                    nextB.add(r.getOtherNodeId(nodeId));
+                                }
+
+                            }
                         }
                     }
                 }
@@ -129,15 +135,12 @@ public class Procedures {
     @Procedure(name = "com.maxdemarzi.khops2", mode = Mode.READ)
     @Description("com.maxdemarzi.khops2(Node node, Long distance, List<String> relationshipTypes)")
     public Stream<LongResult> khops2(@Name("startingNode") Node startingNode, @Name(value = "distance", defaultValue = "1") Long distance,
-                                   @Name(value = "relationshipTypes", defaultValue = "[]") List<String> relationshipTypes) {
+                                     @Name(value = "relationshipTypes", defaultValue = "[]") List<String> relationshipTypes) {
         if (distance < 1) return Stream.empty();
 
         if (startingNode == null) {
             return Stream.empty();
         } else {
-            DependencyResolver dependencyResolver = ((GraphDatabaseAPI)db).getDependencyResolver();
-            final ThreadToStatementContextBridge ctx = dependencyResolver.resolveDependency(ThreadToStatementContextBridge.class, DependencyResolver.SelectionStrategy.FIRST);
-            KernelTransaction ktx = ctx.getKernelTransactionBoundToThisThread(true);
             CursorFactory cursors = ktx.cursors();
             Read read = ktx.dataRead();
             TokenRead tokenRead = ktx.tokenRead();
@@ -153,8 +156,8 @@ public class Procedures {
 
             seen.add(startingNode.getId());
 
-            RelationshipTraversalCursor rels = cursors.allocateRelationshipTraversalCursor();
-            NodeCursor nodeCursor = cursors.allocateNodeCursor();
+            RelationshipTraversalCursor rels = cursors.allocateRelationshipTraversalCursor(ktx.pageCursorTracer());
+            NodeCursor nodeCursor = cursors.allocateNodeCursor(ktx.pageCursorTracer());
 
             read.singleNode(startingNode.getId(), nodeCursor);
 
@@ -162,12 +165,12 @@ public class Procedures {
 
             // First Hop
             if (types.length == 0) {
-                nodeCursor.allRelationships(rels);
+                nodeCursor.relationships(rels, RelationshipSelection.ALL_RELATIONSHIPS);
                 while (rels.next()) {
-                    nextEven.add(rels.neighbourNodeReference());
+                    nextEven.add(rels.otherNodeReference());
                 }
             } else {
-                RelationshipSelectionCursor typedRels = RelationshipSelections.allCursor(cursors, nodeCursor, types);
+                RelationshipTraversalCursor typedRels = RelationshipSelections.allCursor(cursors, nodeCursor, types, ktx.pageCursorTracer());
                 while (typedRels.next()) {
                     nextEven.add(typedRels.otherNodeReference());
                 }
@@ -200,16 +203,13 @@ public class Procedures {
     @Procedure(name = "com.maxdemarzi.parallel.khops2", mode = Mode.READ)
     @Description("com.maxdemarzi.parallel.khops2(Node node, Long distance, List<String> relationshipTypes)")
     public Stream<LongResult> parallelkhops2(@Name("startingNode") Node startingNode,
-                                           @Name(value = "distance", defaultValue = "1") Long distance,
-                                           @Name(value = "relationshipTypes", defaultValue = "[]") List<String> relationshipTypes) {
+                                             @Name(value = "distance", defaultValue = "1") Long distance,
+                                             @Name(value = "relationshipTypes", defaultValue = "[]") List<String> relationshipTypes) {
         if (distance < 1) return Stream.empty();
 
         if (startingNode == null) {
             return Stream.empty();
         } else {
-            DependencyResolver dependencyResolver = ((GraphDatabaseAPI) db).getDependencyResolver();
-            final ThreadToStatementContextBridge ctx = dependencyResolver.resolveDependency(ThreadToStatementContextBridge.class, DependencyResolver.SelectionStrategy.FIRST);
-            KernelTransaction ktx = ctx.getKernelTransactionBoundToThisThread(true);
             CursorFactory cursors = ktx.cursors();
             Read read = ktx.dataRead();
 
@@ -235,8 +235,8 @@ public class Procedures {
 
             seen.add(startingNode.getId());
 
-            RelationshipTraversalCursor rels = cursors.allocateRelationshipTraversalCursor();
-            NodeCursor nodeCursor = cursors.allocateNodeCursor();
+            RelationshipTraversalCursor rels = cursors.allocateRelationshipTraversalCursor(ktx.pageCursorTracer());
+            NodeCursor nodeCursor = cursors.allocateNodeCursor(ktx.pageCursorTracer());
 
             read.singleNode(startingNode.getId(), nodeCursor);
             nodeCursor.next();
@@ -244,14 +244,15 @@ public class Procedures {
             // First Hop
             final AtomicLong index = new AtomicLong(0);
             if (types.length == 0) {
-                nodeCursor.allRelationships(rels);
+                nodeCursor.relationships(rels, RelationshipSelection.ALL_RELATIONSHIPS);
                 while (rels.next()) {
-                    nextEven[(int)(index.getAndIncrement() % THREADS)].add(rels.neighbourNodeReference());
+                    nextEven[(int) (index.getAndIncrement() % THREADS)].add(rels.otherNodeReference());
                 }
             } else {
-                RelationshipSelectionCursor typedRels = RelationshipSelections.allCursor(cursors, nodeCursor, types);
-                while (typedRels.next()) {
-                    nextEven[(int)(index.getAndIncrement() % THREADS)].add(typedRels.otherNodeReference());
+
+                RelationshipTraversalCursor relationshipTraversalCursor = RelationshipSelections.allCursor(cursors, nodeCursor, types, ktx.pageCursorTracer());
+                while (relationshipTraversalCursor.next()) {
+                    nextEven[(int) (index.getAndIncrement() % THREADS)].add(relationshipTraversalCursor.otherNodeReference());
                 }
             }
 
@@ -270,7 +271,7 @@ public class Procedures {
                     nextEven[THREADS].andNot(seen);
                     seen.or(nextEven[THREADS]);
 
-                    nextEven[THREADS].forEach(l -> nextEven[(int)(index.getAndIncrement() % THREADS)].add(l));
+                    nextEven[THREADS].forEach(l -> nextEven[(int) (index.getAndIncrement() % THREADS)].add(l));
 
                 } else {
                     for (int j = 0; j < THREADS; j++) {
@@ -281,7 +282,7 @@ public class Procedures {
                 // Next even Hop
                 for (int j = 0; j < THREADS; j++) {
                     nextOdd[j].clear();
-                    service.submit(new NextHop(db, log, nextOdd[j], nextEven[j], types, ph));
+                    service.submit(new NextHop(db, ktx, log, nextOdd[j], nextEven[j], types, ph));
                 }
 
                 // Wait until all have finished
@@ -300,12 +301,12 @@ public class Procedures {
                     index.set(0);
                     nextOdd[THREADS].andNot(seen);
                     seen.or(nextOdd[THREADS]);
-                    nextOdd[THREADS].forEach(l -> nextOdd[(int)(index.getAndIncrement() % THREADS)].add(l));
+                    nextOdd[THREADS].forEach(l -> nextOdd[(int) (index.getAndIncrement() % THREADS)].add(l));
 
                     // Next odd Hop
                     for (int j = 0; j < THREADS; j++) {
                         nextEven[j].clear();
-                        service.submit(new NextHop(db, log, nextEven[j], nextOdd[j], types, ph));
+                        service.submit(new NextHop(db, ktx, log, nextEven[j], nextOdd[j], types, ph));
                     }
 
                     // Wait until all have finished
@@ -339,26 +340,25 @@ public class Procedures {
         current.andNot(seen);
         seen.or(current);
         next.clear();
-        RelationshipTraversalCursor rels = cursors.allocateRelationshipTraversalCursor();
-        NodeCursor nodeCursor = cursors.allocateNodeCursor();
+        RelationshipTraversalCursor rels = cursors.allocateRelationshipTraversalCursor(ktx.pageCursorTracer());
+        NodeCursor nodeCursor = cursors.allocateNodeCursor(ktx.pageCursorTracer());
 
         current.forEach(nodeId -> {
             read.singleNode(nodeId, nodeCursor);
             nodeCursor.next();
 
             if (types.length == 0) {
-                nodeCursor.allRelationships(rels);
+                nodeCursor.relationships(rels, RelationshipSelection.ALL_RELATIONSHIPS);
                 while (rels.next()) {
-                    next.add(rels.neighbourNodeReference());
+                    next.add(rels.otherNodeReference());
                 }
             } else {
-                RelationshipSelectionCursor typedRels = RelationshipSelections.allCursor(cursors, nodeCursor, types);
+                RelationshipTraversalCursor typedRels = RelationshipSelections.allCursor(cursors, nodeCursor, types, ktx.pageCursorTracer());
                 while (typedRels.next()) {
                     next.add(typedRels.otherNodeReference());
                 }
             }
         });
     }
-
 }
 

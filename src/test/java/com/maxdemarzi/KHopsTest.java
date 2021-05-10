@@ -1,21 +1,23 @@
 package com.maxdemarzi;
 
-import org.junit.jupiter.api.*;
+import org.junit.jupiter.api.AfterAll;
+import org.junit.jupiter.api.BeforeAll;
+import org.junit.jupiter.api.Test;
 import org.neo4j.driver.v1.*;
-import org.neo4j.harness.ServerControls;
-import org.neo4j.harness.TestServerBuilders;
+import org.neo4j.harness.Neo4j;
+import org.neo4j.harness.Neo4jBuilders;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
 public class KHopsTest {
-    private static ServerControls neo4j;
+    private static Neo4j neo4j;
 
     @BeforeAll
     static void startNeo4j() {
-        neo4j = TestServerBuilders.newInProcessBuilder()
+        neo4j = Neo4jBuilders.newInProcessBuilder()
                 .withProcedure(Procedures.class)
                 .withFixture(MODEL_STATEMENT)
-                .newServer();
+                .build();
     }
 
     @AfterAll
